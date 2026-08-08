@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Dataset
+datasets/
+
+# Processed datasets
+processed/
+
+# Train/test datasets
+train_data/
+test_data/
+
+# Generated results
+results/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# PyCharm
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large data files
+*.csv
+*.parquet
+*.zip
+*.rar
+*.7z
