@@ -1,17 +1,21 @@
 import logging
-from os_ken.lib.packet import ethernet, ipv4, ipv6, tcp, udp, arp
+import time
+from collections import defaultdict
+from os_ken.lib.packet import packet, ethernet, ipv4, ipv6, tcp, udp, arp
 
 class TrafficCollector:
     def __init__(self):
         self.logger = logging.getLogger("TrafficCollector")
+        # SYN flood counters: src_ip -> dst_port -> count
+        self.syn_counts = defaultdict(lambda: defaultdict(int))
+        self.last_reset = time.time()
 
     def collect(self, msg, in_port, datapath):
         """
-        Extract detailed packet information from PacketIn message.
+        Extract detailed packet information from PacketIn message and track traffic features.
         Returns a structured dictionary with protocol fields.
         """
         pkt = msg.data
-        from os_ken.lib.packet import packet
         parsed_pkt = packet.Packet(pkt)
 
         details = {
@@ -74,6 +78,20 @@ class TrafficCollector:
             self.logger.info("TCP src_port=%s dst_port=%s seq=%s ack=%s flags=%s",
                              tcp_seg.src_port, tcp_seg.dst_port,
                              tcp_seg.seq, tcp_seg.ack, tcp_seg.bits)
+
+            # TCP SYN flood detection & traffic feature tracking
+            if (tcp_seg.bits & 0x02) and eth:
+                src_ip = ip4.src if ip4 else (ip6.src if ip6 else eth.src)
+                self.syn_counts[src_ip][tcp_seg.dst_port] += 1
+                now = time.time()
+                if now - self.last_reset > 1:  # once per second
+                    for ip, ports in self.syn_counts.items():
+                        for port, count in ports.items():
+                            if count > 1000:  # threshold
+                                self.logger.warning("Possible SYN flood from %s to port %s: %d SYNs/sec",
+                                                    ip, port, count)
+                    self.syn_counts.clear()
+                    self.last_reset = now
 
         # UDP
         udp_seg = parsed_pkt.get_protocol(udp.udp)

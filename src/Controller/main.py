@@ -82,4 +82,10 @@ class IDSController(app_manager.OSKenApp):
         dp.send_msg(out)
 
 if __name__ == "__main__":
-    app_manager.AppManager.run_apps(["controller"])
+    from os_ken.lib.hub import HubThread
+    if not hasattr(HubThread, 'kill'):
+        HubThread.kill = lambda self: None
+    try:
+        app_manager.AppManager.run_apps([__file__])
+    except (KeyboardInterrupt, SystemExit):
+        print("\n[+] Controller shut down gracefully.")
