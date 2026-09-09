@@ -1,167 +1,90 @@
-import pandas as pd
-import numpy as np
+"""Create reproducible train/test CSV splits from cleaned files."""
+
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
 import time
 
-# ============================================================
-# SETTINGS
-# ============================================================
+import numpy as np
+import pandas as pd
 
-INPUT_FOLDER = Path("../processed")
 
-TRAIN_FOLDER = Path("../train_data")
-TEST_FOLDER = Path("../test_data")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-CHUNK_SIZE = 100_000
 
-TRAIN_RATIO = 0.80
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "processed"))
+    parser.add_argument("--train-dir", default=str(PROJECT_ROOT / "train_data"))
+    parser.add_argument("--test-dir", default=str(PROJECT_ROOT / "test_data"))
+    parser.add_argument("--ratio", type=float, default=0.80)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--chunk-size", type=int, default=100_000)
+    args = parser.parse_args()
 
-RANDOM_SEED = 42
+    if not 0.0 < args.ratio < 1.0:
+        raise ValueError("--ratio must be between 0 and 1")
 
-# ============================================================
-# CREATE OUTPUT FOLDERS
-# ============================================================
+    input_dir = Path(args.input_dir).expanduser().resolve()
+    train_dir = Path(args.train_dir).expanduser().resolve()
+    test_dir = Path(args.test_dir).expanduser().resolve()
+    train_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
 
-TRAIN_FOLDER.mkdir(exist_ok=True)
-TEST_FOLDER.mkdir(exist_ok=True)
+    files = sorted(input_dir.glob("*_clean.csv"))
+    if not files:
+        raise FileNotFoundError(f"No *_clean.csv files found in {input_dir}")
 
-# ============================================================
-# FIND CLEANED DATASETS
-# ============================================================
+    rng = np.random.default_rng(args.seed)
+    print(f"Found {len(files)} cleaned files")
 
-csv_files = sorted(INPUT_FOLDER.glob("*_clean.csv"))
+    for input_file in files:
+        train_file = train_dir / input_file.name.replace("_clean.csv", "_train.csv")
+        test_file = test_dir / input_file.name.replace("_clean.csv", "_test.csv")
+        for path in (train_file, test_file):
+            if path.exists():
+                path.unlink()
 
-print(f"\nFound {len(csv_files)} cleaned CSV files.\n")
+        train_written = False
+        test_written = False
+        total_rows = train_rows = test_rows = 0
+        start = time.time()
 
-if len(csv_files) == 0:
-    raise FileNotFoundError(
-        "No *_clean.csv files were found in the processed folder."
-    )
+        for chunk in pd.read_csv(input_file, chunksize=args.chunk_size, low_memory=False):
+            total_rows += len(chunk)
+            train_mask = rng.random(len(chunk)) < args.ratio
+            train_chunk = chunk.loc[train_mask]
+            test_chunk = chunk.loc[~train_mask]
+            train_rows += len(train_chunk)
+            test_rows += len(test_chunk)
 
-# ============================================================
-# PROCESS EACH DATASET
-# ============================================================
+            if not train_chunk.empty:
+                train_chunk.to_csv(
+                    train_file,
+                    mode="a" if train_written else "w",
+                    header=not train_written,
+                    index=False,
+                )
+                train_written = True
+            if not test_chunk.empty:
+                test_chunk.to_csv(
+                    test_file,
+                    mode="a" if test_written else "w",
+                    header=not test_written,
+                    index=False,
+                )
+                test_written = True
 
-for input_file in csv_files:
-
-    print("=" * 70)
-    print(f"Processing: {input_file.name}")
-
-    start_time = time.time()
-
-    train_file = TRAIN_FOLDER / input_file.name.replace(
-        "_clean.csv",
-        "_train.csv"
-    )
-
-    test_file = TEST_FOLDER / input_file.name.replace(
-        "_clean.csv",
-        "_test.csv"
-    )
-
-    # Remove old output files if they already exist
-    if train_file.exists():
-        train_file.unlink()
-
-    if test_file.exists():
-        test_file.unlink()
-
-    first_chunk = True
-
-    total_rows = 0
-    train_rows = 0
-    test_rows = 0
-
-    # ========================================================
-    # READ FILE IN CHUNKS
-    # ========================================================
-
-    for chunk in pd.read_csv(
-        input_file,
-        chunksize=CHUNK_SIZE,
-        low_memory=False
-    ):
-
-        total_rows += len(chunk)
-
-        # ----------------------------------------------------
-        # Generate reproducible random numbers
-        # ----------------------------------------------------
-
-        rng = np.random.default_rng(
-            RANDOM_SEED + total_rows
+        print(
+            f"{input_file.name}: total={total_rows:,}, "
+            f"train={train_rows:,} ({train_rows / total_rows * 100:.2f}%), "
+            f"test={test_rows:,} ({test_rows / total_rows * 100:.2f}%), "
+            f"time={time.time() - start:.2f}s"
         )
 
-        random_values = rng.random(len(chunk))
+    print("80/20 TRAIN-TEST SPLIT COMPLETED")
 
-        train_mask = random_values < TRAIN_RATIO
 
-        train_chunk = chunk[train_mask]
-        test_chunk = chunk[~train_mask]
-
-        train_rows += len(train_chunk)
-        test_rows += len(test_chunk)
-
-        # ----------------------------------------------------
-        # Save training data
-        # ----------------------------------------------------
-
-        if len(train_chunk) > 0:
-
-            train_chunk.to_csv(
-                train_file,
-                mode="w" if first_chunk else "a",
-                header=first_chunk,
-                index=False
-            )
-
-        # ----------------------------------------------------
-        # Save testing data
-        # ----------------------------------------------------
-
-        if len(test_chunk) > 0:
-
-            test_chunk.to_csv(
-                test_file,
-                mode="w" if first_chunk else "a",
-                header=first_chunk,
-                index=False
-            )
-
-        first_chunk = False
-
-    elapsed = time.time() - start_time
-
-    # ========================================================
-    # RESULTS
-    # ========================================================
-
-    train_percentage = (
-        train_rows / total_rows * 100
-        if total_rows > 0
-        else 0
-    )
-
-    test_percentage = (
-        test_rows / total_rows * 100
-        if total_rows > 0
-        else 0
-    )
-
-    print(f"\nOriginal rows : {total_rows:,}")
-
-    print(
-        f"Training rows : {train_rows:,} "
-        f"({train_percentage:.2f}%)"
-    )
-
-    print(
-        f"Testing rows  : {test_rows:,} "
-        f"({test_percentage:.2f}%)"
-    )
-
-    print(f"Time          : {elapsed:.2f} seconds")
-
-print("\n" + "=" * 70)
-print("80/20 TRAIN-TEST SPLIT COMPLETED SUCCESSFULLY")
-print("=" * 70)
+if __name__ == "__main__":
+    main()

@@ -1,208 +1,176 @@
-import pandas as pd
-import numpy as np
+"""Clean CIC-DDoS2019 CSV files without loading a whole file into memory.
+
+Numerical scaling is deliberately fitted later by ``train_arf_v2.py`` on the
+training split only, preventing test-set leakage.
+"""
+
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
 import time
 
-# ============================================================
-# SETTINGS
-# ============================================================
+import numpy as np
+import pandas as pd
 
-DATASET_FOLDER_01 = Path("../dataset/01-12")
-DATASET_FOLDER_03 = Path("../dataset/03-11")
 
-OUTPUT_FOLDER = Path("../processed")
-
-CHUNK_SIZE = 100000
-
-OUTPUT_FOLDER.mkdir(exist_ok=True)
-
-# ============================================================
-# FOUR FILES TO PROCESS
-# ============================================================
-
-FILES_TO_PROCESS = [
-    (DATASET_FOLDER_01 / "Syn.csv", "Syn_clean.csv"),
-    (DATASET_FOLDER_01 / "UDPLag.csv", "UDPLag_clean.csv"),
-
-    (DATASET_FOLDER_03 / "Syn2.csv", "Syn2_clean.csv"),
-    (DATASET_FOLDER_03 / "UDPLag2.csv", "UDPLag2_clean.csv"),
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_INPUT_CANDIDATES = [
+    PROJECT_ROOT / "datasets",
+    PROJECT_ROOT / "dataset",
+    PROJECT_ROOT / "src" / "dataset",
+    PROJECT_ROOT.parent / "dataset",
 ]
+DEFAULT_OUTPUT = PROJECT_ROOT / "processed"
+CHUNK_SIZE = 100_000
 
-# ============================================================
-# COLUMNS TO REMOVE
-# ============================================================
+DROP_COLUMNS = {
+    "unnamed: 0",
+    "flow id",
+    "source ip",
+    "destination ip",
+    "timestamp",
+}
 
-DROP_COLUMNS = [
-    "Unnamed: 0",
-    "Flow ID",
-    "Source IP",
-    "Destination IP",
-    "Timestamp"
-]
+CONSTANT_COLUMNS = {
+    "bwd psh flags",
+    "fwd urg flags",
+    "bwd urg flags",
+    "fin flag count",
+    "psh flag count",
+    "ece flag count",
+    "fwd avg bytes/bulk",
+    "fwd avg packets/bulk",
+    "fwd avg bulk rate",
+    "bwd avg bytes/bulk",
+    "bwd avg packets/bulk",
+    "bwd avg bulk rate",
+}
 
-# Constant columns found during our verification
-CONSTANT_COLUMNS = [
-    "Bwd PSH Flags",
-    "Fwd URG Flags",
-    "Bwd URG Flags",
-    "FIN Flag Count",
-    "PSH Flag Count",
-    "ECE Flag Count",
-    "Fwd Avg Bytes/Bulk",
-    "Fwd Avg Packets/Bulk",
-    "Fwd Avg Bulk Rate",
-    "Bwd Avg Bytes/Bulk",
-    "Bwd Avg Packets/Bulk",
-    "Bwd Avg Bulk Rate"
-]
 
-# ============================================================
-# PROCESS
-# ============================================================
+def find_input_dir(value: str | None) -> Path:
+    if value:
+        path = Path(value).expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Input dataset directory not found: {path}")
+        return path
+    for path in DEFAULT_INPUT_CANDIDATES:
+        if path.exists() and any(path.rglob("*.csv")):
+            return path
+    choices = ", ".join(str(path) for path in DEFAULT_INPUT_CANDIDATES)
+    raise FileNotFoundError(
+        "No dataset CSV directory found. Checked: " + choices
+    )
 
-for input_file, output_name in FILES_TO_PROCESS:
 
-    print("\n" + "=" * 70)
-    print(f"Processing: {input_file}")
-    print(f"Output    : {output_name}")
+def output_name(input_file: Path) -> str:
+    stem = input_file.stem
+    return f"{stem}.csv" if stem.endswith("_clean") else f"{stem}_clean.csv"
 
-    if not input_file.exists():
-        print("ERROR: Input file not found!")
-        continue
 
-    output_file = OUTPUT_FOLDER / output_name
-
-    # Delete existing output if present
+def process_file(input_file: Path, output_file: Path, chunk_size: int) -> dict:
     if output_file.exists():
         output_file.unlink()
 
-    start_time = time.time()
-
     first_chunk = True
-
     total_rows = 0
     nan_removed = 0
     duplicate_removed = 0
+    final_rows = 0
+    seen_hashes: set[int] = set()
+    start = time.time()
 
-    # Hashes of rows already encountered
-    seen_hashes = set()
-
-    # ========================================================
-    # READ IN CHUNKS
-    # ========================================================
-
-    for chunk in pd.read_csv(
-        input_file,
-        chunksize=CHUNK_SIZE,
-        low_memory=False
-    ):
-
+    for chunk in pd.read_csv(input_file, chunksize=chunk_size, low_memory=False):
         total_rows += len(chunk)
+        chunk.columns = chunk.columns.astype(str).str.strip()
 
-        # ----------------------------------------------------
-        # Clean column names
-        # ----------------------------------------------------
+        drop_columns = [
+            column for column in chunk.columns
+            if column.strip().lower() in DROP_COLUMNS
+            or column.strip().lower() in CONSTANT_COLUMNS
+        ]
+        if drop_columns:
+            chunk.drop(columns=drop_columns, inplace=True)
 
-        chunk.columns = chunk.columns.str.strip()
+        if "Label" in chunk.columns:
+            chunk["Label"] = chunk["Label"].astype(str).str.strip()
 
-        # ----------------------------------------------------
-        # Remove identifier columns
-        # ----------------------------------------------------
-
-        chunk.drop(
-            columns=DROP_COLUMNS,
-            errors="ignore",
-            inplace=True
-        )
-
-        # ----------------------------------------------------
-        # Remove constant columns
-        # ----------------------------------------------------
-
-        chunk.drop(
-            columns=CONSTANT_COLUMNS,
-            errors="ignore",
-            inplace=True
-        )
-
-        # ----------------------------------------------------
-        # Replace infinity
-        # ----------------------------------------------------
-
-        chunk.replace(
-            [np.inf, -np.inf],
-            np.nan,
-            inplace=True
-        )
-
-        # ----------------------------------------------------
-        # Remove NaN rows
-        # ----------------------------------------------------
-
-        before_nan = len(chunk)
-
+        chunk.replace([np.inf, -np.inf], np.nan, inplace=True)
+        before = len(chunk)
         chunk.dropna(inplace=True)
+        nan_removed += before - len(chunk)
 
-        nan_removed += before_nan - len(chunk)
-
-        # ----------------------------------------------------
-        # Remove duplicate rows
-        # ----------------------------------------------------
-
-        if len(chunk) > 0:
-
-            row_hashes = pd.util.hash_pandas_object(
-                chunk,
-                index=False
-            )
-
-            keep_mask = []
-            new_hashes = set()
-
-            for row_hash in row_hashes:
-
-                row_hash = int(row_hash)
-
+        if not chunk.empty:
+            hashes = pd.util.hash_pandas_object(chunk, index=False)
+            keep = []
+            for value in hashes:
+                row_hash = int(value)
                 if row_hash in seen_hashes:
-                    keep_mask.append(False)
+                    keep.append(False)
                     duplicate_removed += 1
-
                 else:
-                    keep_mask.append(True)
+                    keep.append(True)
                     seen_hashes.add(row_hash)
+            chunk = chunk.loc[keep]
 
-            chunk = chunk.loc[keep_mask]
-
-        # ----------------------------------------------------
-        # Save cleaned chunk
-        # ----------------------------------------------------
-
-        if len(chunk) > 0:
-
+        if not chunk.empty:
             chunk.to_csv(
                 output_file,
                 mode="w" if first_chunk else "a",
                 header=first_chunk,
-                index=False
+                index=False,
             )
-
             first_chunk = False
+            final_rows += len(chunk)
 
-    # ========================================================
-    # FINAL INFORMATION
-    # ========================================================
+    return {
+        "input": str(input_file),
+        "output": str(output_file),
+        "original_rows": total_rows,
+        "nan_removed": nan_removed,
+        "duplicates_removed": duplicate_removed,
+        "final_rows": final_rows,
+        "seconds": round(time.time() - start, 2),
+    }
 
-    final_rows = len(seen_hashes)
 
-    elapsed = time.time() - start_time
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input-dir", help="Raw dataset directory")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--files", nargs="*", help="Specific CSV paths")
+    parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
+    args = parser.parse_args()
 
-    print("\nCompleted:")
-    print(f"Original rows      : {total_rows:,}")
-    print(f"NaN rows removed   : {nan_removed:,}")
-    print(f"Duplicates removed : {duplicate_removed:,}")
-    print(f"Final rows         : {final_rows:,}")
-    print(f"Time               : {elapsed:.2f} seconds")
+    input_dir = find_input_dir(args.input_dir)
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-print("\n" + "=" * 70)
-print("FOUR DATASETS CLEANED SUCCESSFULLY")
-print("=" * 70)
+    files = [
+        Path(file).expanduser().resolve() for file in args.files
+    ] if args.files else sorted(input_dir.rglob("*.csv"))
+    if not files:
+        raise FileNotFoundError(f"No CSV files found under {input_dir}")
+
+    print(f"Input directory : {input_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"Files found     : {len(files)}")
+
+    for input_file in files:
+        if not input_file.exists():
+            print(f"SKIP missing file: {input_file}")
+            continue
+        output_file = output_dir / output_name(input_file)
+        print(f"\nProcessing: {input_file}")
+        summary = process_file(input_file, output_file, args.chunk_size)
+        print(f"Original rows      : {summary['original_rows']:,}")
+        print(f"NaN rows removed   : {summary['nan_removed']:,}")
+        print(f"Duplicates removed : {summary['duplicates_removed']:,}")
+        print(f"Final rows         : {summary['final_rows']:,}")
+        print(f"Time               : {summary['seconds']:.2f} seconds")
+
+    print("\nDATASET CLEANING COMPLETED")
+
+
+if __name__ == "__main__":
+    main()

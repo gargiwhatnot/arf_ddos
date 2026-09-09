@@ -1,0 +1,7 @@
+# Runtime and training dependencies for this project
+numpy
+pandas
+river==0.25.0
+scapy
+scikit-learn
+os-ken
